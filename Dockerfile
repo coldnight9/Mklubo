@@ -1,19 +1,57 @@
-FROM debian
-RUN apt update
-RUN DEBIAN_FRONTEND=noninteractive apt install qemu-kvm *zenhei* xz-utils dbus-x11 curl firefox-esr gnome-system-monitor mate-system-monitor  git xfce4 xfce4-terminal tightvncserver wget   -y
-RUN wget https://github.com/novnc/noVNC/archive/refs/tags/v1.2.0.tar.gz
-RUN curl -LO https://proot.gitlab.io/proot/bin/proot
-RUN chmod 755 proot
-RUN mv proot /bin
-RUN tar -xvf v1.2.0.tar.gz
-RUN mkdir  $HOME/.vnc
-RUN echo 'luo' | vncpasswd -f > $HOME/.vnc/passwd
-RUN chmod 600 $HOME/.vnc/passwd
-RUN echo 'whoami ' >>/luo.sh
-RUN echo 'cd ' >>/luo.sh
-RUN echo "su -l -c  'vncserver :2000 -geometry 1280x800' "  >>/luo.sh
-RUN echo 'cd /noVNC-1.2.0' >>/luo.sh
-RUN echo './utils/launch.sh  --vnc localhost:7900 --listen 8900 ' >>/luo.sh
-RUN chmod 755 /luo.sh
-EXPOSE 8900
-CMD  /luo.sh
+# Build biliup's web-ui
+FROM node:16-alpine as webui
+
+RUN \
+  set -eux && \
+  apk add --no-cache git && \
+  git clone --depth 1 https://github.com/ForgQi/biliup.git && \
+  cd biliup && \
+  npm install && \
+  npm run build
+
+# Deploy Biliup
+FROM python:3.9-slim as biliup
+ENV TZ=Asia/Shanghai
+EXPOSE 19159/tcp
+VOLUME /opt
+
+RUN \
+  set -eux; \
+#  apk update && \
+    # save list of currently installed packages for later so we can clean up
+  savedAptMark="$(apt-mark showmanual)"; \
+  apt-get update; \
+#  apk add --no-cache --virtual .build-deps git curl gcc g++ && \
+#  apk add --no-cache ffmpeg musl-dev libffi-dev zlib-dev jpeg-dev ca-certificates && \
+  apt-get install -y --no-install-recommends ffmpeg git g++; \
+  git clone --depth 1 https://github.com/ForgQi/biliup.git && \
+  cd biliup && \
+  pip3 install --no-cache-dir quickjs && \
+  pip3 install -e . && \
+  # Clean up \
+  apt-mark auto '.*' > /dev/null; \
+  apt-mark manual ffmpeg; \
+  [ -z "$savedAptMark" ] || apt-mark manual $savedAptMark; \
+  find /usr/local -type f -executable -exec ldd '{}' ';' \
+     | awk '/=>/ { print $(NF-1) }' \
+     | sort -u \
+     | xargs -r dpkg-query --search \
+     | cut -d: -f1 \
+     | sort -u \
+     | xargs -r apt-mark manual \
+     ; \
+  apt-get purge -y --auto-remove -o APT::AutoRemove::RecommendsImportant=false; \
+  rm -rf \
+    /tmp/* \
+    /usr/share/doc/* \
+    /var/cache/* \
+    /var/lib/apt/lists/* \
+    /var/tmp/* && \
+  #  apk del --purge .build-deps && \
+#  rm -rf /var/cache/apk/* && \
+  rm -rf /var/log/*
+
+COPY --from=webui /biliup/biliup/web/public/ /biliup/biliup/web/public/
+WORKDIR /opt
+
+ENTRYPOINT ["biliup"]
