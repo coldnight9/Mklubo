@@ -1,440 +1,151 @@
-# syntax=docker/dockerfile:experimental
-
-ARG BASEIMAGE=debian
-ARG BASETAG=11-slim
-
-ARG ARG_MERGE_STAGE_VNC_BASE=stage_vnc
-ARG ARG_MERGE_STAGE_BROWSER_BASE=merge_stage_vnc
-ARG ARG_FINAL_STAGE_BASE=merge_stage_browser
-
-ARG ARG_HEADLESS_USER_ID=1000
-ARG ARG_HEADLESS_USER_NAME=headless
-ARG ARG_HEADLESS_USER_GROUP_ID=1000
-ARG ARG_HEADLESS_USER_GROUP_NAME=headless
-ARG ARG_SUDO_INITIAL_PW=headless
-
-
-###############
-### stage_cache
-###############
-
-FROM ${BASEIMAGE}:${BASETAG} as stage_cache
-
-### refresh the 'apt' cache
-RUN rm -f /etc/apt/apt.conf.d/docker-clean ; \
-    echo 'Binary::apt::APT::Keep-Downloaded-Packages "true" ;' > /etc/apt/apt.conf.d/keep-cache
-RUN apt-get update
-
-### embed the local '.g3-cache' from the build context
-### note that the bound cache '/tmp/cache2' is ephemeral and all written data will be discarded automatically
-### therefore copy its content into the another permanent cache '/tmp/g3-cache'
-RUN \
-    --mount=type=bind,target=/tmp/cache2 \
-    mkdir -p /tmp/g3-cache \
-    && if [ -d /tmp/cache2/.g3-cache/ ] ; then cp -r /tmp/cache2/.g3-cache/* /tmp/g3-cache/ ; fi
-
-
-####################
-### stage_essentials
-####################
-
-FROM ${BASEIMAGE}:${BASETAG} as stage_essentials
-
-RUN \
-    --mount=type=cache,from=stage_cache,sharing=locked,source=/var/cache/apt,target=/var/cache/apt \
-    --mount=type=cache,from=stage_cache,sharing=locked,source=/var/lib/apt,target=/var/lib/apt \
-    DEBIAN_FRONTEND=noninteractive apt-get install -y \
-        gettext-base \
-        gir1.2-rsvg-2.0 \
-        jq \
-        nano \
-        procps \
-        psmisc \
-        sudo \
-        tini \
-        wget
-
-
-#################
-### stage_xserver
-#################
-
-FROM stage_essentials as stage_xserver
-ARG ARG_APT_NO_RECOMMENDS
-
-ENV \
-    FEATURES_BUILD_SLIM_XSERVER="${ARG_APT_NO_RECOMMENDS:+1}" \
-    NO_AT_BRIDGE=1
-
-RUN \
-    --mount=type=cache,from=stage_cache,sharing=locked,source=/var/cache/apt,target=/var/cache/apt \
-    --mount=type=cache,from=stage_cache,sharing=locked,source=/var/lib/apt,target=/var/lib/apt \
-    DEBIAN_FRONTEND=noninteractive apt-get install -y "${ARG_APT_NO_RECOMMENDS:+--no-install-recommends}" \
-        dbus-x11 \
-        xauth \
-        xinit \
-        x11-xserver-utils \
-        xdg-utils
-
-
-##############
-### stage_xfce
-##############
-
-FROM stage_xserver as stage_xfce
-ARG ARG_APT_NO_RECOMMENDS
-
-ENV FEATURES_BUILD_SLIM_XFCE="${ARG_APT_NO_RECOMMENDS:+1}"
-
-RUN \
-    --mount=type=cache,from=stage_cache,sharing=locked,source=/var/cache/apt,target=/var/cache/apt \
-    --mount=type=cache,from=stage_cache,sharing=locked,source=/var/lib/apt,target=/var/lib/apt \
-    DEBIAN_FRONTEND=noninteractive apt-get install -y "${ARG_APT_NO_RECOMMENDS:+--no-install-recommends}" \
-        xfce4 \
-        xfce4-terminal
-
-
-###############
-### stage_tools
-###############
-
-FROM stage_xfce as stage_tools
-ARG ARG_APT_NO_RECOMMENDS
-ARG ARG_FEATURES_SCREENSHOOTING
-ARG ARG_FEATURES_THUMBNAILING
-
-ENV \
-    FEATURES_BUILD_SLIM_TOOLS="${ARG_APT_NO_RECOMMENDS:+1}" \
-    FEATURES_SCREENSHOOTING="${ARG_FEATURES_SCREENSHOOTING:+1}" \
-    FEATURES_THUMBNAILING="${ARG_FEATURES_THUMBNAILING:+1}"
-
-RUN \
-    --mount=type=cache,from=stage_cache,sharing=locked,source=/var/cache/apt,target=/var/cache/apt \
-    --mount=type=cache,from=stage_cache,sharing=locked,source=/var/lib/apt,target=/var/lib/apt \
-    DEBIAN_FRONTEND=noninteractive apt-get install -y "${ARG_APT_NO_RECOMMENDS:+--no-install-recommends}" \
-        mousepad \
-        python3 \
-        systemctl \
-        "${ARG_FEATURES_SCREENSHOOTING:+ristretto}" \
-        "${ARG_FEATURES_SCREENSHOOTING:+xfce4-screenshooter}" \
-        "${ARG_FEATURES_THUMBNAILING:+tumbler}"
-
-
-#############
-### stage_vnc
-#############
-
-FROM stage_tools as stage_vnc
-ARG ARG_VNC_COL_DEPTH
-ARG ARG_VNC_DISPLAY
-ARG ARG_VNC_PORT
-ARG ARG_VNC_PW
-ARG ARG_VNC_RESOLUTION
-ARG ARG_VNC_VIEW_ONLY
-ARG ARG_TIGERVNC_DISTRO
-ARG ARG_TIGERVNC_VERSION
-
-RUN \
-    --mount=type=cache,from=stage_cache,sharing=locked,source=/var/cache/apt,target=/var/cache/apt \
-    --mount=type=cache,from=stage_cache,sharing=locked,source=/var/lib/apt,target=/var/lib/apt \
-    --mount=type=cache,from=stage_cache,sharing=locked,source=/tmp/g3-cache/,target=/tmp/g3-cache/ \
-    TIGERVNC_VERSION="${ARG_TIGERVNC_VERSION}" \
-    TIGERVNC_DISTRO="${ARG_TIGERVNC_DISTRO}" \
-    &&  if [ ! -s /tmp/g3-cache/tigervnc/tigervnc-"${TIGERVNC_VERSION}"."${TIGERVNC_DISTRO}".tar.gz ] ; then  \
-            wget --show-progress --progress=bar:force:noscroll \
-                -q https://sourceforge.net/projects/tigervnc/files/stable/"${TIGERVNC_VERSION}"/tigervnc-"${TIGERVNC_VERSION}"."${TIGERVNC_DISTRO}".tar.gz \
-                -P /tmp/g3-cache/tigervnc ; \
-        fi \
-    &&  tar xzf /tmp/g3-cache/tigervnc/tigervnc-"${TIGERVNC_VERSION}"."${TIGERVNC_DISTRO}".tar.gz --strip 1 -C / \
-    &&  ln -s /usr/libexec/vncserver /usr/bin/vncserver \
-    &&  sed -i 's/exec(@cmd);/print "@cmd";\nexec(@cmd);/g' /usr/libexec/vncserver
-
-ENV \
-    DISPLAY="${ARG_VNC_DISPLAY:-:1}" \
-    FEATURES_VNC=1 \
-    VNC_COL_DEPTH="${ARG_VNC_COL_DEPTH:-24}" \
-    VNC_PORT="${ARG_VNC_PORT:-5901}" \
-    VNC_PW="${ARG_VNC_PW:-headless}" \
-    VNC_RESOLUTION="${ARG_VNC_RESOLUTION:-1360x768}" \
-    VNC_VIEW_ONLY="${ARG_VNC_VIEW_ONLY:-false}"
-
-EXPOSE "${VNC_PORT}"
-
-
-###############
-### stage_novnc
-###############
-
-FROM stage_vnc as stage_novnc
-ARG ARG_APT_NO_RECOMMENDS
-ARG ARG_NOVNC_PORT
-ARG ARG_NOVNC_VERSION
-ARG ARG_WEBSOCKIFY_VERSION
-
-ENV \
-    FEATURES_BUILD_SLIM_NOVNC="${ARG_APT_NO_RECOMMENDS:+1}" \
-    FEATURES_NOVNC=1 \
-    NOVNC_HOME="/usr/libexec/noVNCdim" \
-    NOVNC_PORT="${ARG_NOVNC_PORT:-6901}"
-
-RUN \
-    --mount=type=cache,from=stage_cache,sharing=locked,source=/var/cache/apt,target=/var/cache/apt \
-    --mount=type=cache,from=stage_cache,sharing=locked,source=/var/lib/apt,target=/var/lib/apt \
-    --mount=type=cache,from=stage_cache,sharing=locked,source=/tmp/g3-cache/,target=/tmp/g3-cache/ \
-    DEBIAN_FRONTEND=noninteractive apt-get install -y "${ARG_APT_NO_RECOMMENDS:+--no-install-recommends}" \
-        python3-numpy \
-    &&  mkdir -p "${NOVNC_HOME}"/utils/websockify \
-    &&  NOVNC_VERSION="${ARG_NOVNC_VERSION}" \
-    &&  WEBSOCKIFY_VERSION="${ARG_WEBSOCKIFY_VERSION}" \
-    &&  if [ ! -s /tmp/g3-cache/novnc/v"${NOVNC_VERSION}".tar.gz ] ; then \
-            wget --show-progress --progress=bar:force:noscroll \
-                -q https://github.com/novnc/noVNC/archive/v"${NOVNC_VERSION}".tar.gz \
-                -P /tmp/g3-cache/novnc ; \
-        fi \
-    &&  if [ ! -s /tmp/g3-cache/websockify/v"${WEBSOCKIFY_VERSION}".tar.gz ] ; then \
-            wget --show-progress --progress=bar:force:noscroll \
-                -q https://github.com/novnc/websockify/archive/v"${WEBSOCKIFY_VERSION}".tar.gz \
-                -P /tmp/g3-cache/websockify ; \
-        fi \
-    &&  tar xzf /tmp/g3-cache/novnc/v"${NOVNC_VERSION}".tar.gz --strip 1 -C "${NOVNC_HOME}" \
-    &&  tar xzf /tmp/g3-cache/websockify/v"${WEBSOCKIFY_VERSION}".tar.gz --strip 1 -C "${NOVNC_HOME}"/utils/websockify \
-    &&  chmod 755 -v "${NOVNC_HOME}"/utils/novnc_proxy
-
-### add 'index.html' for choosing noVNC client
-RUN echo \
-"<!DOCTYPE html>\n\
-<html>\n\
-    <head>\n\
-        <title>noVNC</title>\n\
-        <meta charset=\"utf-8\"/>\n\
-    </head>\n\
-    <body>\n\
-        <p><a href=\"vnc_lite.html\">noVNC Lite Client</a></p>\n\
-        <p><a href=\"vnc.html\">noVNC Full Client</a></p>\n\
-    </body>\n\
-</html>" \
-> "${NOVNC_HOME}"/index.html
-
-EXPOSE "${NOVNC_PORT}"
-
-
-###################
-### merge_stage_vnc
-###################
-
-FROM ${ARG_MERGE_STAGE_VNC_BASE} as merge_stage_vnc
-ARG ARG_HEADLESS_USER_ID
-ARG ARG_HEADLESS_USER_NAME
-ARG ARG_HEADLESS_USER_GROUP_ID
-ARG ARG_HEADLESS_USER_GROUP_NAME
-
-ENV \
-    HEADLESS_USER_ID="${ARG_HEADLESS_USER_ID}" \
-    HEADLESS_USER_NAME="${ARG_HEADLESS_USER_NAME}" \
-    HEADLESS_USER_GROUP_ID="${ARG_HEADLESS_USER_GROUP_ID}" \
-    HEADLESS_USER_GROUP_NAME="${ARG_HEADLESS_USER_GROUP_NAME}" \
-    HOME="${ARG_HOME:-/home/${ARG_HEADLESS_USER_NAME}}"
-
-WORKDIR "${HOME}"
-
-
-##################
-### stage_chromium
-##################
-
-FROM merge_stage_vnc as stage_chromium
-ARG ARG_APT_NO_RECOMMENDS
-
-ENV \
-    FEATURES_BUILD_SLIM_CHROMIUM="${ARG_APT_NO_RECOMMENDS:+1}" \
-    FEATURES_CHROMIUM=1
-
-RUN \
-    --mount=type=cache,from=stage_cache,sharing=locked,source=/var/cache/apt,target=/var/cache/apt \
-    --mount=type=cache,from=stage_cache,sharing=locked,source=/var/lib/apt,target=/var/lib/apt \
-    DEBIAN_FRONTEND=noninteractive apt-get install -y "${ARG_APT_NO_RECOMMENDS:+--no-install-recommends}" \
-        chromium
-
-COPY ./xfce-chromium/src/home/Desktop "${HOME}"/Desktop/
-COPY ./xfce-chromium/src/home/readme*.md "${HOME}"/
-
-
-#################
-### stage_firefox
-#################
-
-FROM merge_stage_vnc as stage_firefox
-ARG ARG_APT_NO_RECOMMENDS
-
-ENV \
-    FEATURES_BUILD_SLIM_FIREFOX="${ARG_APT_NO_RECOMMENDS:+1}" \
-    FEATURES_FIREFOX=1
-
-RUN \
-    --mount=type=cache,from=stage_cache,sharing=locked,source=/var/cache/apt,target=/var/cache/apt \
-    --mount=type=cache,from=stage_cache,sharing=locked,source=/var/lib/apt,target=/var/lib/apt \
-    DEBIAN_FRONTEND=noninteractive apt-get install -y "${ARG_APT_NO_RECOMMENDS:+--no-install-recommends}" \
-        firefox-esr
-
-COPY ./xfce-firefox/src/home/Desktop "${HOME}"/Desktop/
-
-
-### ##################
-### stage_firefox_plus
-### ##################
-
-FROM stage_firefox as stage_firefox_plus
-
-ENV FEATURES_FIREFOX_PLUS=1
-
-COPY ./xfce-firefox/src/firefox.plus/home/Desktop "${HOME}"/Desktop/
-COPY ./xfce-firefox/src/firefox.plus/resources "${HOME}"/firefox.plus/
-COPY ./xfce-firefox/src/firefox.plus/home/readme*.md "${HOME}"/
-
-RUN \
-    chmod 744 "${HOME}"/firefox.plus/*.sh \
-    && envsubst <"${HOME}/Desktop/Copy FF Preferences.desktop" >/tmp/esub.tmp && mv -f /tmp/esub.tmp "${HOME}/Desktop/Copy FF Preferences.desktop" \
-    && install -o root -g root -m 644 "${HOME}"/firefox.plus/accetto.svg /usr/share/icons/hicolor/scalable/apps/ \
-    && gtk-update-icon-cache -f /usr/share/icons/hicolor
-
-
-#######################
-### merge_stage_browser
-#######################
-
-FROM ${ARG_MERGE_STAGE_BROWSER_BASE} as merge_stage_browser
-
-
-################
-### stage-python
-################
-
-FROM merge_stage_browser as stage_python
-ARG ARG_APT_NO_RECOMMENDS
-
-ENV \
-    FEATURES_BUILD_SLIM_PYTHON="${ARG_APT_NO_RECOMMENDS:+1}" \
-    FEATURES_PYTHON=1 \
-    PATH="${HOME}/.local/bin:${PATH}"
-
-RUN \
-    --mount=type=cache,from=stage_cache,sharing=locked,source=/var/cache/apt,target=/var/cache/apt \
-    --mount=type=cache,from=stage_cache,sharing=locked,source=/var/lib/apt,target=/var/lib/apt \
-    DEBIAN_FRONTEND=noninteractive apt-get install -y "${ARG_APT_NO_RECOMMENDS:+--no-install-recommends}" \
-        curl \
-        git \
-        python3-pip \
-    &&  update-alternatives --install /usr/bin/python python /usr/bin/python3 1000 \
-    &&  update-alternatives --install /usr/bin/pip pip /usr/bin/pip3 1000 \
-    &&  mkdir -p "${HOME}"/projects/samples
-
-COPY ./xfce-python/src/home/readme*.md "${HOME}"/
-COPY ./xfce-python/src/samples "${HOME}"/projects/samples
-
-
-################
-### stage_vscode
-################
-
-FROM stage_python as stage_vscode
-ARG ARG_APT_NO_RECOMMENDS
-
-ENV \
-    DONT_PROMPT_WSL_INSTALL=1 \
-    FEATURES_VSCODE=1
-
-RUN \
-    --mount=type=cache,from=stage_cache,sharing=locked,source=/var/cache/apt,target=/var/cache/apt \
-    --mount=type=cache,from=stage_cache,sharing=locked,source=/var/lib/apt,target=/var/lib/apt \
-    DEBIAN_FRONTEND=noninteractive apt-get install -y "${ARG_APT_NO_RECOMMENDS:+--no-install-recommends}" \
-        gpg \
+FROM debian:bullseye
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV TZ=America/New_York
+
+# Username and password for the non-root user in the container.
+# If these are changed then it is also necessary to change directory
+# names in the panel.bash and panel.desktop files.
+ARG USERNAME=student
+ARG PASSWD=student
+
+# Install the necessary system software.
+# The list of system software was adapted from the cypress/base:16.14.2 Dockerfile.
+#  https://github.com/cypress-io/cypress-docker-images/blob/master/base/16.14.2/Dockerfile
+RUN apt-get update \
+ && apt-get install --no-install-recommends -y \
+        libgtk2.0-0 \
+        libgtk-3-0 \      
+        libnotify-dev \
+        libgconf-2-4 \
+        libgbm-dev \
+        libnss3 \
+        libxss1 \
         libasound2 \
-        libxshmfence1
+        libxtst6 \
+        libpci3 \
+        libsecret-1-0 \
+        software-properties-common \
+        gnupg2 \
+        atfs \
+        at-spi2-core \
+        procps \
+        xauth \
+        xvfb \
+        fonts-noto-color-emoji
 
-RUN \
-    curl https://packages.microsoft.com/keys/microsoft.asc | gpg --dearmor > packages.microsoft.gpg \
-    && install -o root -g root -m 644 packages.microsoft.gpg /etc/apt/trusted.gpg.d/ \
-    && sh -c 'echo "deb [arch=amd64] https://packages.microsoft.com/repos/code stable main" > /etc/apt/sources.list.d/vscode.list' \
-    && apt-get update \
-    && DEBIAN_FRONTEND=noninteractive apt-get install -y \
-        apt-transport-https \
-        code \
-    && rm -f "${HOME}"/packages.microsoft.gpg
+# Install some base applications.
+RUN apt-get install --no-install-recommends -y \
+        sudo \
+        vim-tiny \
+        nano \
+        wget \
+        curl \
+        man \
+        synaptic \
+        firefox-esr \
+        git \
+        gedit \
+        emacs \
+        meld
 
-COPY "./xfce-vscode/src/home/Desktop" "${HOME}/Desktop"/
-COPY "./xfce-vscode/src/home/config" "${HOME}/.config"/
+# Install VSCodium.  Note: Extensions can be installed later so that
+# they are installed just for the non-root user.
+COPY vscodium.bash .
+RUN ./vscodium.bash \
+ && rm vscodium.bash
 
+# Add environment variable to /etc/profile so that VSCodium
+# launches on Windows with WSL without a warning.
+ENV DONT_PROMPT_WSL_INSTALL=1
 
-###############
-### FINAL STAGE
-###############
+# Install the XFCE4 desktop environment.
+# Note: Power management does not work inside docker so it is removed.
+RUN apt-get install -y --no-install-recommends \
+        xfce4 \
+        xfce4-goodies \
+        xfce4-terminal -y \
+ && apt-get autoremove -y \
+        xfce4-power-manager
 
-FROM ${ARG_FINAL_STAGE_BASE} as stage_final
-ARG ARG_FEATURES_OVERRIDING_ENVV
-ARG ARG_SUDO_INITIAL_PW
+# Install the Tiger VNC server, the noVNC server and dbus-x11 depndency.
+# Also rename vnc.html so that the the noVNC server can be accessed
+# more directly.
+RUN apt-get install -y --no-install-recommends \
+        tigervnc-standalone-server \
+        tigervnc-common \
+        dbus-x11 \
+        novnc \
+        net-tools \
+ && cp /usr/share/novnc/vnc.html /usr/share/novnc/index.html
 
-ENV \
-    FEATURES_OVERRIDING_ENVV="${ARG_FEATURES_OVERRIDING_ENVV:+1}" \
-    FEATURES_VERSION_STICKER=1 \
-    STARTUPDIR="/dockerstartup"
+# Create the non-root user inside the container and give them sudo privlidges.
+RUN useradd \
+    -m $USERNAME -p "$(openssl passwd -1 $PASSWD)" \
+    -s /bin/bash \
+    -G sudo
 
-COPY ./src/xfce-startup "${STARTUPDIR}"/
-COPY ./src/tests "${HOME}"/tests/
+USER $USERNAME
+WORKDIR /home/$USERNAME
 
-COPY ./xfce/src/home/config "${HOME}"/.config/
-COPY ./xfce/src/home/Desktop "${HOME}"/Desktop/
-COPY ./xfce/src/home/readme*.md "${HOME}"/
+# Configure the VNC server so that it allows a connection without a login.
+RUN touch .Xauthority \
+ && mkdir .vnc \
+ && /bin/bash -c "echo -e '$PASSWD\n$PASSWD\nn' | vncpasswd; echo;"
+COPY --chown=$USERNAME:$USERNAME ./xstartup .vnc/xstartup
+USER root
+RUN echo ":1=$USERNAME" >> /etc/tigervnc/vncserver.users \
+ && chmod +x .vnc/xstartup
+USER $USERNAME
 
-### Note that the line 'chmod 666 /etc/passwd /etc/group' sets the "softer" permissions only temporary.
-### It allows the user generator startup script to configure the user and the group correctly.
-### The script will set the permissions of both files back to the default '644'.
-### The script will also clear the file '.initial_sudo_password' after using it.
-### However, note that the initial sudo password will still be persisted in the image history.
-### You have to change it inside the container, if you want to keep it really secret.
-### Note that all this will not be done, if the startup script will not be executed.
-RUN \
-    chmod 666 /etc/passwd /etc/group \
-    &&  echo "${HEADLESS_USER_GROUP_NAME}:x:${HEADLESS_USER_GROUP_ID}:" >> /etc/group \
-    &&  echo "${HEADLESS_USER_NAME}:x:${HEADLESS_USER_ID}:${HEADLESS_USER_GROUP_ID}:Default:${HOME}:/bin/bash" >> /etc/passwd \
-    &&  echo "${HEADLESS_USER_NAME}  ALL=(ALL:ALL) ALL" | sudo tee /etc/sudoers.d/"${HEADLESS_USER_NAME}" \
-    &&  echo "${ARG_SUDO_INITIAL_PW:-headless}" > "${STARTUPDIR}"/.initial_sudo_password \
-    &&  echo "${HEADLESS_USER_NAME}:$(cat "${STARTUPDIR}"/.initial_sudo_password)" | chpasswd \
-    &&  ln -s "${HOME}"/readme.md "${HOME}"/Desktop/README \
-    &&  envsubst <"${HOME}"/Desktop/versionsticker.desktop >/tmp/esub.tmp && mv -f /tmp/esub.tmp "${HOME}"/Desktop/versionsticker.desktop \
-    && "${STARTUPDIR}"/set_user_permissions.sh "${STARTUPDIR}" "${HOME}"
+# Add some scripts for the running container.
+RUN mkdir .contconf \
+ && mkdir -p .config/autostart
 
-USER "${HEADLESS_USER_ID}"
+# startup.bash is run when the container starts.  It sets the ownership and group
+# for the FarmData2 repo and the fd2test directories and starts the VNC and noVNC
+# servers.
+COPY --chown=$USERNAME:$USERNAME ./startup.bash .contconf/startup.bash
+# .bash_aliases defines a few shortcut commands that are useful when doing FarmData2
+# development work.
+COPY --chown=$USERNAME:$USERNAME ./bash_aliases .bash_aliases
+# panel.bash configures the launcheer panel at the bottom of the XFCE4 desktop by adding
+# icons for Mousepad, VSCodium and Firefox...
+COPY --chown=$USERNAME:$USERNAME ./panel.bash .contconf/panel.bash
+# panel.desktop ensures that the panel.bash script is run when the XFCE4 desktop is started.
+COPY --chown=$USERNAME:$USERNAME ./panel.desktop .config/autostart/panel.desktop
+# terminalrc has the setting that enables unicode in the terminal
+COPY --chown=$USERNAME:$USERNAME ./terminalrc .config/xfce4/terminal/terminalrc
 
-ENTRYPOINT [ "/usr/bin/tini", "--", "/dockerstartup/startup.sh" ]
+RUN chmod +x .contconf/startup.bash \
+ && chmod +x .contconf/panel.bash \
+ && chmod +x .config/autostart/panel.desktop
 
-# RUN chmod 644 /etc/passwd /etc/group
-# ENTRYPOINT [ "/usr/bin/tini", "--", "tail", "-f", "/dev/null" ]
+# Do some git configuration so that the student doesn't have to.
+RUN git config --global credential.helper store \
+ && git config --global merge.conflictstyle diff3 \
+ && git config --global merge.tool meld \
+ && git config --global mergetool.keepBackup false \
+ && git config --global core.editor "nano" \
+ && git config --global pull.ff only \
+ && git config --global init.defaultBranch main \
+ && git config --global safe.directory '*' \
+ && echo "" >> .bashrc \
+ && echo "source /usr/share/bash-completion/completions/git" >> .bashrc
 
+# Install some useful VSCodium extensions
+RUN codium --install-extension streetsidesoftware.code-spell-checker \
+  && codium --install-extension bierner.markdown-preview-github-styles
 
-##################
-### METADATA STAGE
-##################
+# Stuff to reduce image size.
+USER root
+RUN apt-get clean -y \
+ && apt-get autoclean -y \
+ && apt-get autoremove -y \
+ && rm -rf /var/lib/apt/lists/*
 
-FROM stage_final as stage_metadata
-ARG ARG_CREATED
-ARG ARG_DOCKER_TAG
-ARG ARG_VCS_REF
-ARG ARG_VERSION_STICKER
+USER $USERNAME
 
-LABEL \
-    org.opencontainers.image.authors="accetto" \
-    org.opencontainers.image.created="${ARG_CREATED}" \
-    org.opencontainers.image.description="Headless Debian/Xfce/VNC/noVNC/Chromium/Firefox containers for Python programming" \
-    org.opencontainers.image.documentation="https://github.com/accetto/headless-coding-g3" \
-    org.opencontainers.image.source="https://github.com/accetto/headless-coding-g3" \
-    org.opencontainers.image.title="accetto/debian-vnc-xfce-python-g3" \
-    org.opencontainers.image.url="https://github.com/accetto/headless-coding-g3" \
-    org.opencontainers.image.vendor="https://github.com/accetto" \
-    org.opencontainers.image.version="${ARG_DOCKER_TAG}"
-
-LABEL \
-    org.label-schema.vcs-url="https://github.com/accetto/headless-coding-g3" \
-    org.label-schema.vcs-ref="${ARG_VCS_REF}"
-
-LABEL \
-    any.accetto.version-sticker="${ARG_VERSION_STICKER}"
+# Run the startup.bash script to ensure that 
+# the VNC and noVNC servers are running.
+ENTRYPOINT .contconf/startup.bash
