@@ -1,57 +1,31 @@
-# Build biliup's web-ui
-FROM node:16-alpine as webui
+FROM debian:bookworm
+MAINTAINER "Hiroki Takeyama"
 
-RUN \
-  set -eux && \
-  apk add --no-cache git && \
-  git clone --depth 1 https://github.com/ForgQi/biliup.git && \
-  cd biliup && \
-  npm install && \
-  npm run build
+# timezone
+RUN apt update && apt install -y tzdata; \
+    apt clean;
 
-# Deploy Biliup
-FROM python:3.9-slim as biliup
-ENV TZ=Asia/Shanghai
-EXPOSE 19159/tcp
-VOLUME /opt
+# sshd
+RUN mkdir /var/run/sshd; \
+    apt install -y openssh-server; \
+    sed -i 's/^#\(PermitRootLogin\) .*/\1 yes/' /etc/ssh/sshd_config; \
+    sed -i 's/^\(UsePAM yes\)/# \1/' /etc/ssh/sshd_config; \
+    apt clean;
 
-RUN \
-  set -eux; \
-#  apk update && \
-    # save list of currently installed packages for later so we can clean up
-  savedAptMark="$(apt-mark showmanual)"; \
-  apt-get update; \
-#  apk add --no-cache --virtual .build-deps git curl gcc g++ && \
-#  apk add --no-cache ffmpeg musl-dev libffi-dev zlib-dev jpeg-dev ca-certificates && \
-  apt-get install -y --no-install-recommends ffmpeg git g++; \
-  git clone --depth 1 https://github.com/ForgQi/biliup.git && \
-  cd biliup && \
-  pip3 install --no-cache-dir quickjs && \
-  pip3 install -e . && \
-  # Clean up \
-  apt-mark auto '.*' > /dev/null; \
-  apt-mark manual ffmpeg; \
-  [ -z "$savedAptMark" ] || apt-mark manual $savedAptMark; \
-  find /usr/local -type f -executable -exec ldd '{}' ';' \
-     | awk '/=>/ { print $(NF-1) }' \
-     | sort -u \
-     | xargs -r dpkg-query --search \
-     | cut -d: -f1 \
-     | sort -u \
-     | xargs -r apt-mark manual \
-     ; \
-  apt-get purge -y --auto-remove -o APT::AutoRemove::RecommendsImportant=false; \
-  rm -rf \
-    /tmp/* \
-    /usr/share/doc/* \
-    /var/cache/* \
-    /var/lib/apt/lists/* \
-    /var/tmp/* && \
-  #  apk del --purge .build-deps && \
-#  rm -rf /var/cache/apk/* && \
-  rm -rf /var/log/*
+# entrypoint
+RUN { \
+    echo '#!/bin/bash -eu'; \
+    echo 'ln -fs /usr/share/zoneinfo/${TZ} /etc/localtime'; \
+    echo 'echo "root:${ROOT_PASSWORD}" | chpasswd'; \
+    echo 'exec "$@"'; \
+    } > /usr/local/bin/entry_point.sh; \
+    chmod +x /usr/local/bin/entry_point.sh;
 
-COPY --from=webui /biliup/biliup/web/public/ /biliup/biliup/web/public/
-WORKDIR /opt
+ENV TZ Asia/Tokyo
 
-ENTRYPOINT ["biliup"]
+ENV ROOT_PASSWORD root
+
+EXPOSE 22
+
+ENTRYPOINT ["entry_point.sh"]
+CMD    ["/usr/sbin/sshd", "-D", "-e"]
